@@ -8,4 +8,6 @@ Untitled*
 csv/
 __pycache__/
 listaUASGs-orig.csv
-DadosComprasNet*
+DadosComprasNet.*
+*.txt
+!requirements.txt

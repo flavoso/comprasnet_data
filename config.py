@@ -8,6 +8,10 @@ ARQ_UASGS = 'listaUASGs.csv'
 SAS_LIBREF = 'LIB_MATR'
 SQLITE_DB = 'DadosComprasNet.sqlite'
 DIR_CSV = 'csv/'
+# Máximo de threads na execução concorrente. Um número excessivo poderá
+# caracterizar ataque DOS contra o http://compras.dados.gov.br/
+MAX_WORKERS_PREGOES = 10
+MAX_WORKERS_ITENS = 10
 
 colunas = namedtuple('colunas', 'pregoes itens propostas eventos adjudicacao')
 

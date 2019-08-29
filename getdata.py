@@ -1,3 +1,4 @@
+import datetime
 import sqlite3
 import time
 from collections import namedtuple
@@ -8,12 +9,10 @@ import pandas as pd
 from tqdm import tqdm
 
 from componentes import Uasg, Pregao, Item
-from config import ARQ_UASGS, SUBST, SQLITE_DB, DIR_CSV
+from config import ARQ_UASGS, SUBST, SQLITE_DB, DIR_CSV, MAX_WORKERS_ITENS, \
+    MAX_WORKERS_PREGOES
 
-# Máximo de threads na execução concorrente. Um número excessivo poderá
-# caracterizar ataque DOS contra o http://compras.dados.gov.br/
-MAX_WORKERS = 100
-LISTA_UASGS = pd.read_csv(ARQ_UASGS)
+df_uasgs = pd.read_csv(ARQ_UASGS, index_col='codUASG')
 
 Tabela = namedtuple('Tabela', 'dados nome')
 
@@ -33,27 +32,9 @@ def to_csv(dfs, co_uasg):
     return
 
 
-def to_sqlite2(dfs, uasg):
-    """
-    Salva os dataframes da uasg em base sqlite.
-    :param dfs: Dicionário contendo os dataframes a serem salvos.
-    :return: None
-    """
-
-    nome = str(uasg) + '.sqlite'
-    base = sqlite3.connect(nome)
-
-    for df in dfs.values():
-        df.dados.to_sql(df.nome_tabela, base, if_exists='replace', index=False)
-
-    base.close()
-
-    return
-
-
 def to_sqlite():
     """
-    Corrotina para salvar um dataframe na base sqlite ('SQLITE_DB').
+    Corotina para salvar um dataframe na base sqlite ('SQLITE_DB').
     :param dfs: Dicionário contendo os dataframes a serem salvos.
     """
 
@@ -85,33 +66,27 @@ def to_sqlite():
         remove('temp.db')
 
 
-def to_sqlite3(dfs):
+def download_item(obj_item):
     """
-    Salva os dataframes em base sqlite, de modo incremental.
-    :param dfs: Dicionário contendo os dataframes a serem salvos.
-    :return: None
+    Efetua download dos elementos de um item: propostas e
+    adjudicações, os quais são armazenados em dataframes correspondentes.
+    :param obj_item: objeto (Série pandas com os dados do item)
+    :return: tupla elementos Tabela (namedtuple), correspondentes aos
+    dataframes das propostas e adjudicaçõo.
     """
+    item = Item(obj_item)
+    if item.num_partes != 0:
+        df_propostas = item.partes()  # Download da tabela de propostas do item
+        tupla_adjudic = item.adjudicacao()  # Download da adjudicação do item
 
-    main = sqlite3.connect(SQLITE_DB)
-    cur = main.cursor()
-    temp = sqlite3.connect('temp.db')
+        # Ajustando nome das colunas de df_propostas
+        cols_orig = df_propostas.columns
+        df_propostas.columns = [SUBST[c] for c in cols_orig]
 
-    for df in dfs.values():
-        df.dados.to_sql(df.nome_tabela, temp, if_exists='replace', index=False)
+        tab_proposta = Tabela(df_propostas, 'BASE_PREGAO_PROPOSTA')
 
-    cur.execute("ATTACH 'temp.db' as db1")
-
-    for df in dfs.values():
-        sql = f"INSERT INTO {df.nome_tabela} SELECT * FROM db1.{df.nome_tabela}"
-        cur.execute(sql)
-
-    main.commit()
-    cur.execute("DETACH db1")
-
-    temp.close()
-    main.close()
-
-    return
+        return tab_proposta, tupla_adjudic
+    return None
 
 
 def download_pregao(obj_pregao):
@@ -123,39 +98,32 @@ def download_pregao(obj_pregao):
     pregões baixados
     :return: tupla de dataframes (df_itens, df_propostas, df_adjudicações).
     """
-
     pregao = Pregao(obj_pregao)
+    num_itens = pregao.num_partes
     df_itens = pregao.partes()  # Download da tabela de itens
-    lista_df_propostas = []
-    lista_adjudic = []
+    lista_tab_propostas = []     # Lista das propostas de todos os itens
+    lista_tup_adjudics = []      # Lista das adjudicações de todos os itens
 
-    for obj_item in pregao:
-        item = Item(obj_item)
-        lista_df_propostas.append(item.partes())  # Download de propostas
-        lista_adjudic.append(item.adjudicacao())  # Download da adjudicação
+    # Download concorrente dos itens do pregão
+    workers = min(MAX_WORKERS_ITENS, num_itens)
+    with futures.ThreadPoolExecutor(workers) as executor:
+        a_baixar = {}
+        for item in pregao:
+            futuro = executor.submit(download_item, item)
+            a_baixar[futuro] = item
+        feito_iter = futures.as_completed(a_baixar)
+        for p in feito_iter:
+            lista_tab_propostas.append(p.result()[0])
+            lista_tup_adjudics.append(p.result()[1])
 
-    # Geração do dataframe das propostas
+    # Ajustando nomes das colunas de df_itens
+    cols_orig = df_itens.columns
+    df_itens.columns = [SUBST[c] for c in cols_orig]
 
-    df_propostas = pd.concat(lista_df_propostas, ignore_index=True, sort=False)
-
-    # Geração do dataframe das adjudicações
-    # O método item.adjudicacao() retorna None quando a adjudicação não
-    # ocorreu. Por isso, é necessário expurgar os None da 'lista_adjudic'
-    # antes de converter para DataFrame.
-
-    df_adjudicacoes = pd.DataFrame([i for i in lista_adjudic if i])
-
-    # Ajustando nomes das colunas dos dataframes ver arquivo config.py)
-    for df in df_itens, df_propostas:
-        cols_orig = df.columns
-        df.columns = [SUBST[c] for c in cols_orig]
-
-    # Geração das namedtuples que serão enviadas à corrotina to_sqlite()
+    # Namedtuple que será enviadas à corotina to_sqlite()
     tab_itens = Tabela(df_itens, 'BASE_PREGAO_ITEM')
-    tab_propostas = Tabela(df_propostas, 'BASE_PREGAO_PROPOSTA')
-    tab_adjudicacoes = Tabela(df_adjudicacoes, 'BASE_PREGAO_ADJUDICACAO')
 
-    return tab_itens, tab_propostas, tab_adjudicacoes
+    return tab_itens, lista_tab_propostas, lista_tup_adjudics
 
 
 def download_uasg(cod_uasg):
@@ -167,9 +135,7 @@ def download_uasg(cod_uasg):
     """
 
     uasg = Uasg(cod_uasg)
-    nome = 'SECRETARIA DE ESTADO DE CIÊNCIA TECNOLOGIA E INOVAÇÃO'
-    # nome = LISTA_UASGS.loc[
-    #     LISTA_UASGS['codUASG'] == cod_uasg]['nomeUASG'].iloc[0]
+    nome = df_uasgs.loc[cod_uasg]['nomeUASG']
     msg = f'{nome} ({cod_uasg}): {uasg.num_partes} pregão(ões)'
     print('\n')
     print('-' * 50)
@@ -179,18 +145,19 @@ def download_uasg(cod_uasg):
 
     if num_pregoes != 0:
         tabelas = []
+        lista_adjudics = []
         df_pregoes = uasg.partes()  # Download do dataframe dos pregões da UASG
 
         # Renomeando as colunas do dataframe dos pregões
         cols_orig = df_pregoes.columns
         df_pregoes.columns = [SUBST[c] for c in cols_orig]
 
-        # Criando namedtuple que será enviada à corrotina to_sqlite()
+        # Criando namedtuple que será enviada à corotina to_sqlite()
         tab_pregoes = Tabela(df_pregoes, 'BASE_PREGAO')
         tabelas.append(tab_pregoes)
 
         # Download concorrente dos pregões
-        workers = min(MAX_WORKERS, num_pregoes)
+        workers = min(MAX_WORKERS_PREGOES, num_pregoes)
         with futures.ThreadPoolExecutor(workers) as executor:
             a_baixar = {}
             print('Processando pregões')
@@ -199,41 +166,76 @@ def download_uasg(cod_uasg):
                 a_baixar[futuro] = pregao
             feito_iter = futures.as_completed(a_baixar)
             feito_iter = tqdm(feito_iter, total=num_pregoes)
-            # n = 0
             for p in feito_iter:
-                # n += 1
-                # print(f'\rProcessados {n} de {num_pregoes}', end='')
-                tabs = p.result()
-                for t in tabs:
-                    tabelas.append(t)
+                tab_itens, lista_tab_propostas, lista_tup_adjudics = p.result()
+                tabelas.append(tab_itens)
+                tabelas.extend(lista_tab_propostas)
+                lista_adjudics.extend(lista_tup_adjudics)
 
-        # Salvando no sqlite
+        # Geração do dataframe das adjudicações de todos os itens
+        # O método item.adjudicacao() retorna None quando a adjudicação não
+        # ocorreu. Por isso, é necessário expurgar os None da 'lista_adjudic'
+        # antes de converter para DataFrame.
 
-        print(f'Salvando as tabelas na base de dados')
-        grava = to_sqlite()
-        next(grava)  # "Priming" a corrotina
-        n = 0
-        # Dataframes vazios não precisam ser salvos
-        tabelas = [t for t in tabelas if len(t.dados) != 0]
-        for i, tab in enumerate(tabelas, 1):
-            print(f"\rSalvando tabela {i} de {len(tabelas)}", end='')
-            n = n + grava.send(tab)
-        grava.close()
-        print(f'\n{n} tabelas salvas')
+        df_adjudicacoes = pd.DataFrame([i for i in lista_adjudics if i])
+
+        # Acrescentando as adjudicações à relação das tabelas que serão
+        # enviadas ao banco de dados
+
+        tab_adjudicacoes = Tabela(df_adjudicacoes, 'BASE_PREGAO_ADJUDICACAO')
+        tabelas.append(tab_adjudicacoes)
 
         return tabelas
     return num_pregoes
 
 
+def relata(co_uasg, nome_arq, n, err):
+    """
+    Gera o arquivo log.txt, relatando o progresso dos downloads e salvamentos.
+    :param co_uasg: inteiro, código da UASG
+    :return: None
+    """
+    with open(nome_arq, 'a') as arq:
+        arq.write(f'UASG {co_uasg}: {n} tabelas salvas\n')
+        if err:
+            arq.write(f'{err}\n')
+
+
+def salva(tabelas, co_uasg):
+    """
+    Função que aciona a corotina de salvamento das tabelas na base de dados.
+    :param tabelas: lista de namedtuples do tipo Tabela.
+    :return: None
+    """
+    print(f'Salvando as tabelas na base de dados')
+    grava = to_sqlite()
+    next(grava)  # Preparando ('priming') a corotina
+    n = 0
+    msg = None
+    # Dataframes vazios não precisam ser salvos
+    tabs = [t for t in tabelas if len(t.dados) != 0]
+    for i, tab in enumerate(tabs, 1):
+        print(f"\rSalvando tabela {i} de {len(tabs)}", end='')
+        try:
+            n = n + grava.send(tab)  # O método 'send' envia dados à corotina
+        except sqlite3.Error as err:
+            msg = err
+    grava.close()
+    print(f'\n{n} tabelas salvas')
+    return n, msg
+
+
 def download_todas(lista):
     """
-    Efetua o download de todas as Uasgs listadas.
-    :param lista_uasgs:
+    Efetua o download de todas as UASGs listadas.
+    :param lista_uasgs: série pandas contendo relação dos códigos de UASGs
     :return:
     """
-
+    nome_arq = datetime.datetime.now().strftime('%Y-%m-%d_%Hh%Mm%Ss') + '.txt'
     for co_uasg in lista:
-        download_uasg(co_uasg)
+        tabelas = download_uasg(co_uasg)
+        n, msg = salva(tabelas, co_uasg)
+        relata(co_uasg, nome_arq, n, msg)
 
     return len(lista)
 
@@ -244,15 +246,15 @@ def duracao(segundos):
     :param segundos:
     :return:
     """
-    hs = segundos // 3600
-    mins = (segundos % 3600) // 60
-    segs = (segundos % 3600) % 60
+    hs = int(segundos // 3600)
+    mins = int((segundos % 3600) // 60)
+    segs = int((segundos % 3600) % 60)
     return '{:0>2}h:{:0>2}m:{:0>2}s'.format(hs, mins, segs)
 
 
 def main(df):
     t0 = time.time()
-    lista = df['codUASG']
+    lista = df.index
     # lista = [926266]
     count = download_todas(lista)
     segundos = time.time() - t0
@@ -261,4 +263,4 @@ def main(df):
 
 
 if __name__ == '__main__':
-    main(LISTA_UASGS)
+    main(df_uasgs)
