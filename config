@@ -1,0 +1,25 @@
+[core]
+	repositoryformatversion = 0
+	filemode = false
+	bare = false
+	logallrefupdates = true
+	symlinks = false
+	ignorecase = true
+[gui]
+	wmstate = normal
+	geometry = 893x435+166+114 175 196
+[remote "origin"]
+	url = https://github.com/flavoso/comprasnet_data.git
+	fetch = +refs/heads/*:refs/remotes/origin/*
+[remote "comprasnet_data.git"]
+	url = https://github.com/flavoso/
+	fetch = +refs/heads/*:refs/remotes/comprasnet_data.git/*
+[user]
+	email = flavoso@gmail.com
+	name = flavoso
+
+[http]
+    proxy = http://proxy.tcdf.net:80
+
+[https]
+    proxy = https://proxy.tcdf.net:80

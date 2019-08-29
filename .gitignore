@@ -1,0 +1,11 @@
+venv/
+.ipynb_checkpoints/
+.idea/
+BASE*.csv
+*.ods
+*.db
+Untitled*
+csv/
+__pycache__/
+listaUASGs-orig.csv
+DadosComprasNet*
