@@ -201,7 +201,7 @@ def relata(co_uasg, nome_arq, n, err):
             arq.write(f'{err}\n')
 
 
-def salva(tabelas, co_uasg):
+def salva(tabelas):
     """
     Função que aciona a corotina de salvamento das tabelas na base de dados.
     :param tabelas: lista de namedtuples do tipo Tabela.
@@ -234,7 +234,10 @@ def download_todas(lista):
     nome_arq = datetime.datetime.now().strftime('%Y-%m-%d_%Hh%Mm%Ss') + '.txt'
     for co_uasg in lista:
         tabelas = download_uasg(co_uasg)
-        n, msg = salva(tabelas, co_uasg)
+        n = 0
+        msg = None
+        if tabelas:
+            n, msg = salva(tabelas)
         relata(co_uasg, nome_arq, n, msg)
 
     return len(lista)
